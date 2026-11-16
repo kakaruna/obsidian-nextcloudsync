@@ -280,6 +280,7 @@ Request Failed. SSLHandshakeException java.security.cert.CertPathValidatorExcept
 | 設定 | デスクトップ | モバイル |
 |---|---|---|
 | Server URL / Username / App password | 空 | 空 |
+| 片方向同期（サーバー優先） | OFF | OFF |
 | 同期間隔 | 15 分 | 15 分（無効 — *Sync now* または *起動時同期* を使用） |
 | Wi-Fi のみで同期 | OFF | ON |
 | 設定フォルダを同期（master） | OFF | OFF |

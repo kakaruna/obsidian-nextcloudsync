@@ -157,8 +157,9 @@ export default class ObsidianNextcloudsync extends Plugin {
       // Watch mode: single-file operations; full sync is left to manual Sync Now and the interval.
       // Runs on every platform: on mobile it only fires in the foreground, and whatever it misses is
       // found by the next full sync. "Wi-Fi only" is enforced inside each operation (docs/spec.md §5.7c).
+      const watchOn = (): boolean => this.settings.watchOnChangeEnabled && !this.settings.oneWaySync;
       const guard = (file: TAbstractFile): file is TFile =>
-        this.settings.watchOnChangeEnabled && file instanceof TFile;
+        watchOn() && file instanceof TFile;
 
       // The plugin's own writes (atomic tmp-write -> rename) must not propagate back, or every download
       // becomes a spurious upload/MOVE/DELETE storm. SyncEngine marks them in the LocalAdapter
@@ -183,7 +184,6 @@ export default class ObsidianNextcloudsync extends Plugin {
         debouncedUpload();
       }));
       // Folders propagate immediately via single-folder ops; files use the debounced upload.
-      const watchOn = (): boolean => this.settings.watchOnChangeEnabled;
       this.registerEvent(this.app.vault.on('create', (file: TAbstractFile) => {
         if (!watchOn() || isOwnSyncEvent(file.path)) return;
         if (file instanceof TFolder) { void this.syncEngine?.createSingleFolder(file.path); return; }
@@ -506,22 +506,45 @@ export default class ObsidianNextcloudsync extends Plugin {
     new CommunityPluginPickerModal(this.app, { load, current: this.settings.syncedCommunityPlugins, apply }).open();
   }
 
+  // Applies a live change of `oneWaySync`: when enabled, releases in-memory snapshots and deletes
+  // persisted merge-base / clean-side files immediately so low-memory mobile devices reclaim RAM and disk.
+  async applyOneWaySyncChange(): Promise<void> {
+    const pluginDir = `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+    await this.syncEngine?.abortAndWait();
+    if (this.settings.oneWaySync) {
+      const prevBase = this.baseStore;
+      const prevClean = this.cleanSideStore;
+      this.baseStore = undefined;
+      this.cleanSideStore = undefined;
+      await prevBase?.clearAndPurge();
+      await prevClean?.clearAndPurge();
+      const { MergeBaseStore } = await import('./data/MergeBaseStore');
+      const { CleanSideStore } = await import('./data/CleanSideStore');
+      await MergeBaseStore.purgeFiles(this.app.vault.adapter, pluginDir, this.settings.deviceId);
+      await CleanSideStore.purgeFiles(this.app.vault.adapter, pluginDir, this.settings.deviceId);
+    }
+    if (this.syncEngine || (this.settings.serverUrl && this.settings.username)) {
+      await this.initSyncEngine({ skipStartupSync: true });
+    }
+  }
+
   // Re-entrant-safe: a call arriving during an in-flight init awaits that same promise. A fresh init
   // first tears down any existing engine (see teardownSyncEngine).
-  async initSyncEngine(): Promise<void> {
+  async initSyncEngine(opts: { skipStartupSync?: boolean } = {}): Promise<void> {
     if (this.initializingEngine) return this.initializingEngine;
-    const promise = this.doInitSyncEngine().finally(() => {
+    const promise = this.doInitSyncEngine(opts).finally(() => {
       this.initializingEngine = undefined;
     });
     this.initializingEngine = promise;
     return promise;
   }
 
-  private async doInitSyncEngine(): Promise<void> {
+  private async doInitSyncEngine(opts: { skipStartupSync?: boolean } = {}): Promise<void> {
     this.teardownSyncEngine();
 
     const { StateDB } = await import('./data/StateDB');
     const { MergeBaseStore } = await import('./data/MergeBaseStore');
+    const { CleanSideStore } = await import('./data/CleanSideStore');
     const { SyncHistoryStore } = await import('./data/SyncHistoryStore');
     const { StatusBarItem } = await import('./ui/StatusBarItem');
     const { NoticeStatusBar } = await import('./ui/NoticeStatusBar');
@@ -538,16 +561,24 @@ export default class ObsidianNextcloudsync extends Plugin {
     this.localAdapter = localAdapter;
     const stateDB = new StateDB(this.app.vault.adapter, pluginDir, this.settings.deviceId);
     await stateDB.load();
-    // Last-synced bodies (merge base) for 3-way conflict merges; a separate file.
-    const baseStore = new MergeBaseStore(this.app.vault.adapter, pluginDir, this.settings.deviceId);
-    await baseStore.load();
-    this.baseStore = baseStore;
-    // Clean sides of marker-conflicted notes, so force-resolution recovers a real clean version
-    // rather than the marker content; a separate per-device file.
-    const { CleanSideStore } = await import('./data/CleanSideStore');
-    const cleanSideStore = new CleanSideStore(this.app.vault.adapter, pluginDir, this.settings.deviceId);
-    await cleanSideStore.load();
-    this.cleanSideStore = cleanSideStore;
+
+    // One-way sync keeps no local merge-base or clean-side snapshots: never read/parse them into memory
+    // (avoiding OOM on large vaults) and remove any leftover snapshot files from disk.
+    let baseStore: MergeBaseStore | undefined;
+    let cleanSideStore: InstanceType<typeof CleanSideStore> | undefined;
+    if (this.settings.oneWaySync) {
+      this.baseStore = undefined;
+      this.cleanSideStore = undefined;
+      await MergeBaseStore.purgeFiles(this.app.vault.adapter, pluginDir, this.settings.deviceId);
+      await CleanSideStore.purgeFiles(this.app.vault.adapter, pluginDir, this.settings.deviceId);
+    } else {
+      baseStore = new MergeBaseStore(this.app.vault.adapter, pluginDir, this.settings.deviceId);
+      await baseStore.load();
+      this.baseStore = baseStore;
+      cleanSideStore = new CleanSideStore(this.app.vault.adapter, pluginDir, this.settings.deviceId);
+      await cleanSideStore.load();
+      this.cleanSideStore = cleanSideStore;
+    }
     const historyStore = new SyncHistoryStore(this.app.vault.adapter, pluginDir);
     await historyStore.load();
 
@@ -595,7 +626,7 @@ export default class ObsidianNextcloudsync extends Plugin {
     this.applyAutoSyncInterval();
 
     // 0 = no startup sync; 1-10 = seconds to wait.
-    if (this.settings.startupSyncDelaySeconds > 0) {
+    if (!opts.skipStartupSync && this.settings.startupSyncDelaySeconds > 0) {
       const delayMs = this.settings.startupSyncDelaySeconds * 1000;
       window.setTimeout(() => { void this.syncEngine?.syncManual(); }, delayMs);
     }

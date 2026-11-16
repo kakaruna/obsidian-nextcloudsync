@@ -91,6 +91,34 @@ export class CleanSideStore {
     await this.saveMutex.run(() => undefined);
   }
 
+  // Releases in-memory conflict snapshots and removes persisted files without serializing anything.
+  async clearAndPurge(): Promise<void> {
+    if (this.saveTimer !== null) {
+      window.clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    this.snapshots = {};
+    await this.saveMutex.run(async () => {
+      await CleanSideStore.removeIfExists(this.adapter, this.storePath);
+      await CleanSideStore.removeIfExists(this.adapter, this.tmpPath);
+    });
+  }
+
+  // Deletes persisted clean-side files without reading or parsing them into memory.
+  static async purgeFiles(adapter: DataAdapter, pluginDir: string, deviceId: string): Promise<void> {
+    const storePath = `${pluginDir}/conflict-clean-${deviceId}.json`;
+    await CleanSideStore.removeIfExists(adapter, storePath);
+    await CleanSideStore.removeIfExists(adapter, storePath + TMP_SUFFIX);
+  }
+
+  private static async removeIfExists(adapter: DataAdapter, path: string): Promise<void> {
+    try {
+      if (await adapter.exists(path)) await adapter.remove(path);
+    } catch {
+      // Best-effort cleanup: a missing or locked file must not block sync startup.
+    }
+  }
+
   private async doSave(): Promise<void> {
     const json = JSON.stringify(this.snapshots);
     await this.adapter.write(this.tmpPath, json);

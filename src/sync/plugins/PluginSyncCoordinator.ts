@@ -75,7 +75,7 @@ export interface PluginSyncCoordinatorOptions {
   settings: Pick<
     DavSyncSettings,
     'syncConfigFolder' | 'syncedCommunityPlugins' | 'maxFileSizeMB' | 'otherFileStrategy'
-  >;
+  > & { oneWaySync?: boolean };
   localAdapter: Pick<LocalAdapter, 'read' | 'readBinary' | 'stat' | 'exists'>;
   stateDB: Pick<StateDB, 'getFile' | 'getAllFiles' | 'getAllDirs'>;
   awaitingRestart: Set<string>;
@@ -209,6 +209,7 @@ export class PluginSyncCoordinator implements PluginPathGate, LocalWritePort, Pl
   conflictRuleFor(path: string): PluginConflictRule | null {
     const ref = parsePluginPath(path, this.opts.configDir);
     if (ref === null) return null;
+    if (this.opts.settings.oneWaySync) return { kind: 'force', action: 'prefer-remote' };
     if (ref.file === 'data.json') return { kind: 'strategy', strategy: this.opts.settings.otherFileStrategy };
     switch (this.directionFor(ref.id)) {
       case 'remote':
@@ -441,12 +442,19 @@ export class PluginSyncCoordinator implements PluginPathGate, LocalWritePort, Pl
       local.stat === null ? null : { version: versionOf(local.read), mtime: local.stat.mtime };
     const remoteSide: ManifestSide | null =
       remoteInfo === null ? null : { version: versionOf(remote), mtime: remoteInfo.lastModified };
+    const sameContent = fileSameContent({ localHash: local.hash, remote: remoteInfo, base, localChanged });
+    if (this.opts.settings.oneWaySync) {
+      if ((local.stat === null && remoteInfo === null) || sameContent || (!localChanged && !remoteChanged)) {
+        return null;
+      }
+      return 'remote';
+    }
     return decideBundleDirection({
       local: localSide,
       remote: remoteSide,
       localChanged,
       remoteChanged,
-      sameContent: fileSameContent({ localHash: local.hash, remote: remoteInfo, base, localChanged }),
+      sameContent,
     });
   }
 }

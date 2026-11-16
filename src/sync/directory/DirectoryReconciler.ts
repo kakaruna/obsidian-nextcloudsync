@@ -30,6 +30,7 @@ export interface DirectoryDeps {
   markOwnEvent(path: string): void;
   isSystemExcluded(path: string): boolean;
   massDeleteLimit(): number;
+  isOneWaySync?(): boolean;
   // Checked between directory operations so a cancel takes effect promptly.
   isCancelled(): boolean;
   logger?: Pick<FileLogger, 'log'>;
@@ -63,7 +64,13 @@ export class DirectoryReconciler {
     );
     const tracked = new Map(this.deps.stateDB.getAllDirs().map(d => [d.path, d]));
 
-    const plan = classifyDirectories(remoteDirs, localDirs, tracked, (p) => this.deps.isSystemExcluded(p));
+    const plan = classifyDirectories(
+      remoteDirs,
+      localDirs,
+      tracked,
+      (p) => this.deps.isSystemExcluded(p),
+      this.deps.isOneWaySync?.() === true,
+    );
     const { mkcolRemote, mkdirLocal, deleteRemote, trashLocal, ensureTracked, dropTracked } = plan;
 
     // Circuit breaker: a partial listing would make many dirs look deleted.
@@ -190,6 +197,9 @@ export class DirectoryReconciler {
     category: 'deleteRemote' | 'trashLocal',
     choice: 'remote' | 'local',
   ): Promise<void> {
+    if (choice === 'local' && this.deps.isOneWaySync?.()) {
+      throw new Error('Cannot push directory changes to the server while one-way sync is enabled.');
+    }
     if (category === 'deleteRemote') {
       if (choice === 'remote') {
         // Remote is correct: undo the apparent local deletion by recreating the folder locally.

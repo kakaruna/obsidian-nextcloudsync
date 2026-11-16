@@ -265,6 +265,7 @@ These are the options you can change. Most start the same on both platforms; a f
 | Setting | Desktop | Mobile |
 |---|---|---|
 | Server URL / Username / App password | empty | empty |
+| One-way sync (from server) | off | off |
 | Sync interval | 15 min | 15 min (disabled — use *Sync now* or *Sync on startup*) |
 | Sync on Wi-Fi only | off | on |
 | Sync config folder (master) | off | off |

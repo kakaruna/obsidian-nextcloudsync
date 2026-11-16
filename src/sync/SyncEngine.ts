@@ -194,11 +194,13 @@ export class SyncEngine {
       baseStore: opts.baseStore,
       autoMergeFileTypes: () => this.opts.settings.autoMergeFileTypes,
       isPluginPath: (p) => this.plugins.isPluginPath(p),
+      disabled: () => this.opts.settings.oneWaySync,
     });
     this.creationTime = new CreationTimeAligner({
       localAdapter: opts.localAdapter,
       stateDB: opts.stateDB,
       isBeingEdited: (p) => this.opts.isBeingEdited?.(p) ?? false,
+      isOneWaySync: () => this.opts.settings.oneWaySync,
       logger: opts.logger,
     });
     this.transfer = new TransferService({
@@ -276,6 +278,7 @@ export class SyncEngine {
       markOwnEvent: (p) => this.opts.localAdapter.ignore(p),
       isSystemExcluded: (p) => this.isSystemExcluded(p),
       massDeleteLimit: () => this.opts.settings.massDeleteLimit,
+      isOneWaySync: () => this.opts.settings.oneWaySync,
       isCancelled: () => this.cancelled,
       logger: opts.logger,
     });
@@ -294,6 +297,7 @@ export class SyncEngine {
       connect: () => this.connection(),
       renameTracker: () => this.getOrCreateRenameTracker(),
       isBlockedByWifiOnly: () => this.isBlockedByWifiOnly(),
+      isOneWaySync: () => this.opts.settings.oneWaySync,
       isSyncRunning: () => this.running,
       processFile: (remote, summary) => this.processFileWithRetry(remote, summary),
       queueRetry: (p) => { this.retryQueue.push(p); },
@@ -481,8 +485,10 @@ export class SyncEngine {
   // meaningless: files that were out of scope never entered the tracked listing a short-circuit rebuilds
   // (docs/spec.md §8a.5).
   private invalidateRootEtagOnScopeChange(): void {
-    const { syncConfigFolder, configSync, excludedFolders, syncedCommunityPlugins } = this.opts.settings;
-    const fingerprint = computeSyncScopeFingerprint({ syncConfigFolder, configSync, excludedFolders, syncedCommunityPlugins });
+    const { syncConfigFolder, configSync, excludedFolders, syncedCommunityPlugins, oneWaySync } = this.opts.settings;
+    const fingerprint = computeSyncScopeFingerprint({
+      syncConfigFolder, configSync, excludedFolders, syncedCommunityPlugins, oneWaySync,
+    });
     if (this.opts.stateDB.getSyncScopeFingerprint() === fingerprint) return;
     this.opts.stateDB.setRemoteRootEtag(null);
     this.opts.stateDB.setSyncScopeFingerprint(fingerprint);
@@ -619,6 +625,9 @@ export class SyncEngine {
   }
 
   async applyCleanLocal(path: string): Promise<void> {
+    if (this.opts.settings.oneWaySync) {
+      throw new Error('Cannot push to the server while one-way sync is enabled.');
+    }
     return this.resolution.applyCleanLocal(await this.connection(), path);
   }
 
@@ -713,6 +722,9 @@ export class SyncEngine {
 
 
   async pushLocalToRemote(path: string): Promise<void> {
+    if (this.opts.settings.oneWaySync) {
+      throw new Error('Cannot push to the server while one-way sync is enabled.');
+    }
     return this.resolution.pushLocalToRemote(await this.connection(), path);
   }
 
@@ -786,6 +798,9 @@ export class SyncEngine {
       remoteFiles = await client.getFiles('');
     } catch (err) {
       if (!(err instanceof RemoteRootMissingError)) throw err;
+      if (this.opts.settings.oneWaySync) {
+        throw new Error('Remote vault folder does not exist on the server. One-way sync will not create or upload it.');
+      }
       void this.opts.logger?.log('sync: INITIAL — no vault folder on the server yet; the first upload will create it');
       remoteFiles = [];
     }
@@ -869,6 +884,9 @@ export class SyncEngine {
       }
     } catch (err) {
       if (!(err instanceof RemoteRootMissingError)) throw err;
+      if (this.opts.settings.oneWaySync) {
+        throw new Error('Remote vault folder does not exist on the server. One-way sync will not create or upload it.');
+      }
       await this.reseedFromLocal(summary);
       return;
     }
@@ -978,6 +996,10 @@ export class SyncEngine {
   }
 
   private async processRemoteFile(remote: RemoteFileInfo, summary: SyncSessionSummary): Promise<void> {
+    if (this.opts.settings.oneWaySync) {
+      await this.processRemoteFileOneWay(remote, summary);
+      return;
+    }
     const base = this.opts.stateDB.getFile(remote.path);
     const localStat = await this.opts.localAdapter.stat(remote.path);
     const { remoteId, idType } = remoteIdOf(remote);
@@ -1049,6 +1071,53 @@ export class SyncEngine {
       if (this.deferIfBeingEdited(remote.path, 'conflict')) return;
       await this.handleConflict(remote.path, base, remote, remoteId, idType, summary);
     }
+  }
+
+  // Server-authoritative path: never uploads, deletes on the server, or enters 3-way merge.
+  private async processRemoteFileOneWay(remote: RemoteFileInfo, summary: SyncSessionSummary): Promise<void> {
+    const base = this.opts.stateDB.getFile(remote.path);
+    const localStat = await this.opts.localAdapter.stat(remote.path);
+    const { remoteId, idType } = remoteIdOf(remote);
+    const remoteChanged = !base || base.remoteId !== remoteId;
+
+    let localChanged = false;
+    let localHash = base?.localHash ?? '';
+    if (localStat && base) {
+      if (!this.isLocallyUnchanged(base, localStat)) {
+        const buf = await this.opts.localAdapter.readBinary(remote.path);
+        localHash = await sha256(buf);
+        localChanged = localHash !== base.localHash;
+      }
+    } else if (localStat) {
+      const buf = await this.opts.localAdapter.readBinary(remote.path);
+      localHash = await sha256(buf);
+      localChanged = true;
+    }
+
+    const plugin = { localPresent: localStat !== null, localHash, localChanged, remoteId, idType };
+    if (await this.applyPluginFileAction(remote, base, plugin, summary)) return;
+
+    // Missing locally (either new on server or deleted locally): restore from server.
+    if (!localStat) {
+      await this.downloadFile(remote, remoteId, idType, summary);
+      return;
+    }
+
+    if ((remoteChanged || localChanged)
+        && localStat.size === remote.size && checksumProvesIdentical(remote, localHash)) {
+      void this.opts.logger?.log(`sync: content identical to the remote (checksum) → state converged, no transfer → ${remote.path}`);
+      this.opts.stateDB.setFile(await this.withLocalSignature(convergedState(remote, localHash, localStat), remote.lastModified));
+      await this.creationTime.align(this.client!, remote, localStat);
+      return;
+    }
+
+    if (!remoteChanged && !localChanged && base && localStat.size === base.size && !base.isConflicted) {
+      await this.creationTime.align(this.client!, remote, localStat);
+      return;
+    }
+
+    if (this.deferIfBeingEdited(remote.path, 'download')) return;
+    await this.downloadFile(remote, remoteId, idType, summary);
   }
 
   // If-Match 412: the remote changed between PROPFIND and PUT, so treat it as a conflict instead of overwriting (docs/spec.md §6.5).
@@ -1203,6 +1272,10 @@ export class SyncEngine {
   private async processLocalModifications(
     remoteFiles: RemoteFileInfo[], summary: SyncSessionSummary, isFullScan = false,
   ): Promise<void> {
+    if (this.opts.settings.oneWaySync) {
+      await this.processLocalOneWay(remoteFiles, summary, isFullScan);
+      return;
+    }
     const remotePathSet = new Set(remoteFiles.map(f => f.path));
 
     const localStats = new Map<string, { size: number; mtime: number }>();
@@ -1339,6 +1412,94 @@ export class SyncEngine {
     }
   }
 
+  // One-way local reconciliation: never uploads, renames, or deletes on the server. Local-only files and
+  // files removed from the server are moved to local trash, guarded by the mass-delete breaker and 404 check.
+  private async processLocalOneWay(
+    remoteFiles: RemoteFileInfo[], summary: SyncSessionSummary, isFullScan: boolean,
+  ): Promise<void> {
+    const remotePathSet = new Set(remoteFiles.map(f => f.path));
+    const localStats = new Map<string, { size: number; mtime: number }>();
+    await this.collectLocalStats('', localStats);
+    for (const p of await this.configSync.enumerateIncludedPaths()) {
+      const st = await this.opts.localAdapter.stat(p);
+      if (st) localStats.set(p, { size: st.size, mtime: st.mtime });
+    }
+
+    const missingPaths = this.opts.stateDB.getAllFiles()
+      .map(f => f.path)
+      .filter(p => !this.isSystemExcluded(p) && !localStats.has(p) && !remotePathSet.has(p));
+
+    if (isFullScan) {
+      // Gone on both sides: drop local tracking without touching the server.
+      for (const path of missingPaths) {
+        this.opts.stateDB.deleteFile(path);
+      }
+
+      const candidates = [...localStats.keys()].filter(
+        path => !this.isSystemExcluded(path) && !remotePathSet.has(path),
+      );
+      const denominator = Math.max(this.opts.stateDB.getAllFiles().length, remoteFiles.length);
+      await this.deleteOneWayExtras(candidates, denominator, summary);
+      return;
+    }
+
+    // Incremental token path (partial remoteFiles): probe the server directly for locally deleted or modified paths.
+    for (const path of missingPaths) {
+      try {
+        const remote = await this.client!.statFile(path);
+        if (remote) await this.processFileWithRetry(remote, summary);
+        else this.opts.stateDB.deleteFile(path);
+      } catch (err) {
+        this.recordError(summary, path, err);
+      }
+    }
+
+    for (const [path, st] of localStats) {
+      if (this.isSystemExcluded(path) || remotePathSet.has(path)) continue;
+      const base = this.opts.stateDB.getFile(path);
+      if (base && this.isLocallyUnchanged(base, st)) continue;
+      if (base) {
+        const localHash = await sha256(await this.opts.localAdapter.readBinary(path));
+        if (localHash === base.localHash) continue;
+      }
+      try {
+        const remote = await this.client!.statFile(path);
+        if (remote) await this.processFileWithRetry(remote, summary);
+        else await this.processRemoteDeletion(path, summary);
+      } catch (err) {
+        this.recordError(summary, path, err);
+      }
+    }
+  }
+
+  private async deleteOneWayExtras(
+    candidates: string[], denominator: number, summary: SyncSessionSummary, onStep?: () => void,
+  ): Promise<void> {
+    if (candidates.length === 0) return;
+    const limit = this.effectiveMassDeleteLimit(denominator);
+    if (candidates.length > limit) {
+      void this.opts.logger?.log(`delete-local: SKIPPED ${candidates.length} absence-deletions — exceeds safety limit (${limit}); likely a partial remote listing`);
+      new Notice(`⚠️ ${candidates.length} files look deleted on the server — skipped to avoid mass deletion. Re-sync to retry.`, 10000);
+      this.recordError(summary, '(mass-delete breaker)', new Error(`Skipped ${candidates.length} absence-deletions — exceeds safety limit ${limit}`), {
+        all: candidates,
+      });
+      return;
+    }
+
+    for (const path of candidates) {
+      let goneOnServer = false;
+      try { goneOnServer = !(await this.client!.remoteExists(path)); } catch { goneOnServer = false; }
+      if (!goneOnServer) {
+        void this.opts.logger?.log(`delete-local: re-check found it still on server — keeping → ${path}`);
+        onStep?.();
+        continue;
+      }
+      void this.opts.logger?.log(`delete-local: absent on server (confirmed 404) → ${path}`);
+      await this.processRemoteDeletion(path, summary);
+      onStep?.();
+    }
+  }
+
   // Runs only on a COMPLETE listing. Directories are first-class entities, never deleted merely for being empty
   // (docs/spec.md §8a.1, docs/plan.md §16).
   private reconcileDirectories(summary: SyncSessionSummary, cachedDirs?: RemoteDirInfo[]): Promise<void> {
@@ -1353,7 +1514,28 @@ export class SyncEngine {
     const downloads: string[] = [];
     const conflicts: string[] = [];
     const unchanged: string[] = [];
+    const deletes: string[] = [];
     const remoteMap = new Map(remoteFiles.map(f => [f.path, f]));
+
+    if (this.opts.settings.oneWaySync) {
+      for (const [path, lf] of localFiles) {
+        if (this.isSystemExcluded(path)) continue;
+        const remote = remoteMap.get(path);
+        if (!remote) { deletes.push(path); continue; }
+        if (remote.size === lf.size && remote.checksum && lf.size <= MAX_HASH_SIZE) {
+          const localHash = await sha256(await this.opts.localAdapter.readBinary(path));
+          if (localHash === remote.checksum) { unchanged.push(path); continue; }
+        }
+        downloads.push(path);
+      }
+      for (const remote of remoteFiles) {
+        if (this.isSystemExcluded(remote.path)) continue;
+        if (!localFiles.has(remote.path) && !this.pluginSkips(remote.path, 'remote-only')) {
+          downloads.push(remote.path);
+        }
+      }
+      return { uploads, downloads, conflicts, unchanged, deletes };
+    }
 
     for (const [path, lf] of localFiles) {
       const remote = remoteMap.get(path);
@@ -1370,7 +1552,7 @@ export class SyncEngine {
       if (this.isSystemExcluded(remote.path)) continue;
       if (!localFiles.has(remote.path) && !this.pluginSkips(remote.path, 'remote-only')) downloads.push(remote.path);
     }
-    return { uploads, downloads, conflicts, unchanged, deletes: [] };
+    return { uploads, downloads, conflicts, unchanged, deletes };
   }
 
   private async executePlan(
@@ -1379,7 +1561,7 @@ export class SyncEngine {
   ): Promise<void> {
     // The caller already scanned the vault, so reuse the stat map; hashing is deferred to upload time.
     const remoteMap = new Map(remoteFiles.map(f => [f.path, f]));
-    const actionFiles = plan.uploads.length + plan.downloads.length + plan.conflicts.length;
+    const actionFiles = plan.uploads.length + plan.downloads.length + plan.conflicts.length + plan.deletes.length;
     this.syncProgress = { processed: 0, total: actionFiles };
     if (actionFiles > 0) this.opts.statusBar.setProgress(0, actionFiles);
 
@@ -1441,6 +1623,7 @@ export class SyncEngine {
     await this.resolvePlannedConflicts(cf.rest, remoteMap, summary);
     await this.downloadPlanned(dl.manifests, remoteMap, summary);
     await this.resolvePlannedConflicts(cf.manifests, remoteMap, summary);
+    await this.deleteOneWayExtras(plan.deletes, Math.max(remoteFiles.length, localFiles.size), summary, () => this.tickProgress());
   }
 
   private async downloadPlanned(

@@ -99,7 +99,7 @@ const CONFLICT_STRATEGY_OPTIONS = {
 
 // Called on every render (obsidian.d.ts:6577-6583), so the row set is dynamic: one row per excluded folder, and two
 // config-category rows, the community plugin warning, one row per synced plugin and `Choose plugins…` only while the master toggle is on.
-// The count is 27 + excludedFolders.length + (syncConfigFolder ? 2 + 2 + syncedCommunityPlugins.length : 0).
+// The count is 28 + excludedFolders.length + (syncConfigFolder ? 2 + 2 + syncedCommunityPlugins.length : 0).
 export function buildSettingDefinitions(host: SettingDefinitionsHost): SettingDefinitionItem[] {
   return [
     topGroup(host),
@@ -246,6 +246,12 @@ function nextcloudGroup(host: SettingDefinitionsHost): SettingDefinitionGroup {
 function syncGroup(host: SettingDefinitionsHost): SettingDefinitionGroup {
   const s = host.settings;
   return group('Sync', [
+    {
+      name: 'One-way sync (from server)',
+      desc: 'Make the server authoritative: download remote changes, restore locally deleted files, overwrite local edits, and move local-only files and folders to trash (honoring your Obsidian deleted files setting). Never uploads or modifies the server, and keeps no local merge-base snapshots — recommended on low-memory mobile devices to avoid out-of-memory crashes.',
+      aliases: ['unidirectional', 'pull only', 'read only', 'direction', 'server wins', 'snapshot', 'memory', 'oom'],
+      control: { type: 'toggle', key: 'oneWaySync' },
+    },
     slider(
       host,
       'Startup sync delay (seconds)',
@@ -296,7 +302,7 @@ function syncGroup(host: SettingDefinitionsHost): SettingDefinitionGroup {
       name: 'Sync on file change',
       desc: 'Immediately sync a file or folder right after you create, edit, delete, or rename it (a short delay after you stop editing). Deletions and renames propagate too. Works alongside the periodic sync interval. On mobile it runs only while Obsidian is open; anything it misses is sent on the next sync. Paused on cellular when "Sync on Wi-Fi only" is on.',
       aliases: ['watch', 'auto sync', 'realtime', 'live', 'on save'],
-      control: { type: 'toggle', key: 'watchOnChangeEnabled' },
+      control: { type: 'toggle', key: 'watchOnChangeEnabled', disabled: () => s.oneWaySync },
     },
     slider(
       host,
@@ -312,6 +318,7 @@ function syncGroup(host: SettingDefinitionsHost): SettingDefinitionGroup {
 
 
 function conflictGroup(host: SettingDefinitionsHost): SettingDefinitionGroup {
+  const s = host.settings;
   return group('Conflict resolution', [
     {
       // render: the stored value is a string[], and the field shows it comma-joined. A `text`
@@ -329,13 +336,14 @@ function conflictGroup(host: SettingDefinitionsHost): SettingDefinitionGroup {
         type: 'dropdown',
         key: 'autoMergeFileStrategy',
         options: { merge: 'Merge', ...CONFLICT_STRATEGY_OPTIONS },
+        disabled: () => s.oneWaySync,
       },
     },
     {
       name: 'Other file strategy',
       desc: 'How to resolve a conflict on every other file (images, PDFs, config JSON, …). Latest modified keeps the side with the newer modification time — beware that clock skew between devices can let an older edit overwrite a newer one with no prompt. Biggest size keeps the larger file; Local/Remote wins always keep that side. A size or mtime tie is left untouched and re-evaluated next sync.',
       aliases: ['binary', 'images', 'attachments', 'non-text'],
-      control: { type: 'dropdown', key: 'otherFileStrategy', options: { ...CONFLICT_STRATEGY_OPTIONS } },
+      control: { type: 'dropdown', key: 'otherFileStrategy', options: { ...CONFLICT_STRATEGY_OPTIONS }, disabled: () => s.oneWaySync },
     },
     {
       name: 'Frontmatter strategy',
@@ -345,6 +353,7 @@ function conflictGroup(host: SettingDefinitionsHost): SettingDefinitionGroup {
         type: 'dropdown',
         key: 'frontmatterStrategy',
         options: { merge: 'Merge', ...CONFLICT_STRATEGY_OPTIONS },
+        disabled: () => s.oneWaySync,
       },
     },
     {
@@ -355,6 +364,7 @@ function conflictGroup(host: SettingDefinitionsHost): SettingDefinitionGroup {
         type: 'dropdown',
         key: 'conflictStrategy',
         options: { 'conflict-markers': 'Conflict markers', ...CONFLICT_STRATEGY_OPTIONS },
+        disabled: () => s.oneWaySync,
       },
     },
   ]);

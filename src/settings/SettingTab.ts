@@ -68,6 +68,10 @@ export class NextcloudSyncSettingTab extends PluginSettingTab implements Setting
     await this.plugin.saveSettings();
     // Re-arm the auto-sync timer immediately so a new interval takes effect without a reload.
     if (key === 'syncIntervalMinutes') this.plugin.applyAutoSyncInterval();
+    if (key === 'oneWaySync') {
+      await this.plugin.applyOneWaySyncChange();
+      this.update?.();
+    }
   }
 
 
@@ -144,6 +148,7 @@ export class NextcloudSyncSettingTab extends PluginSettingTab implements Setting
     setting.addText((text) => text
       .setPlaceholder('Comma-separated extensions')
       .setValue(formatMergeableExtensions(this.plugin.settings.autoMergeFileTypes))
+      .setDisabled(this.plugin.settings.oneWaySync)
       .onChange(async (value) => {
         this.plugin.settings.autoMergeFileTypes = parseMergeableExtensions(value);
         await this.plugin.saveSettings();

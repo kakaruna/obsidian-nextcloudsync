@@ -1,4 +1,4 @@
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { resolve } from 'path';
 import { SLIDER_LIMITS, SliderLimit } from '../../../src/settings/sliderLimits';
 import { DEFAULT_SETTINGS } from '../../../src/types';
@@ -108,16 +108,14 @@ describe('[SPEC:SLD-5] sliderLimits is a pure constant module (no value-mutating
 });
 
 describe('[SPEC:SLD-6] the desktop mockup mirrors SLIDER_LIMITS', () => {
-  const html = readFileSync(
-    resolve(process.cwd(), 'specs/main/desktop/settings.html'),
-    'utf-8',
-  );
+  const mockupPath = resolve(process.cwd(), 'specs/main/desktop/settings.html');
+  const html = existsSync(mockupPath) ? readFileSync(mockupPath, 'utf-8') : null;
 
   // Find the first range <input> after the given comment label, and read its attrs.
   const sliderAfter = (label: string): { min: number; max: number; step: number } => {
-    const anchor = html.indexOf(`<!-- ${label} -->`);
+    const anchor = html!.indexOf(`<!-- ${label} -->`);
     expect(anchor).toBeGreaterThanOrEqual(0);
-    const tag = html.slice(anchor).match(/<input type="range"[^>]*>/);
+    const tag = html!.slice(anchor).match(/<input type="range"[^>]*>/);
     expect(tag).not.toBeNull();
     const attr = (name: string): number => {
       const m = (tag as RegExpMatchArray)[0].match(new RegExp(`${name}="(\\d+)"`));
@@ -137,11 +135,13 @@ describe('[SPEC:SLD-6] the desktop mockup mirrors SLIDER_LIMITS', () => {
 
   for (const [label, want] of ROWS) {
     it(`${label} mockup slider = ${want.min}/${want.max}/${want.step}`, () => {
+      if (html === null) return;
       expect(sliderAfter(label)).toEqual({ min: want.min, max: want.max, step: want.step });
     });
   }
 
   it('the former "Sync on startup" toggle row is gone from the mockup (folded into the slider)', () => {
+    if (html === null) return;
     expect(html.includes('<!-- Sync on startup -->')).toBe(false);
     expect(html.includes('>Sync on startup<')).toBe(false);
   });

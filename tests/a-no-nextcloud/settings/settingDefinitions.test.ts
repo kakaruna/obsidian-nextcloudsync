@@ -39,6 +39,7 @@ const BASELINE: { heading: string | null; rows: string[] }[] = [
   {
     heading: 'Sync',
     rows: [
+      'One-way sync (from server)',
       'Startup sync delay (seconds)',
       'Sync interval (minutes)',
       'Network timeout (seconds)',
@@ -65,7 +66,7 @@ const BASELINE: { heading: string | null; rows: string[] }[] = [
   { heading: 'Maintenance', rows: ['Reset vault index', 'Mirror from remote', 'Last session summary'] },
 ];
 
-const STATIC_ROW_COUNT = BASELINE.reduce((n, s) => n + s.rows.length, 0); // 27
+const STATIC_ROW_COUNT = BASELINE.reduce((n, s) => n + s.rows.length, 0); // 28
 
 function makeHost(over: Partial<SettingDefinitionsHost> = {}): SettingDefinitionsHost {
   return {
@@ -391,6 +392,21 @@ describe('[SPEC:DSD-5] predicates reflect platform and sign-in state', () => {
     expect(desc).not.toContain('Desktop only');
     expect(desc).toContain('only while Obsidian is open');
     expect(desc).toContain('Sync on Wi-Fi only');
+  });
+
+  it('disables "Sync on file change" and conflict resolution strategies while one-way sync is on', () => {
+    const oneWayHost = makeHost({ settings: { ...DEFAULT_SETTINGS, oneWaySync: true } });
+    const twoWayHost = makeHost({ settings: { ...DEFAULT_SETTINGS, oneWaySync: false } });
+    for (const name of [
+      'Sync on file change',
+      'Auto merge file strategy',
+      'Other file strategy',
+      'Frontmatter strategy',
+      'Conflict strategy',
+    ]) {
+      expect(isDisabled(rowNamed(oneWayHost, name))).toBe(true);
+      expect(isDisabled(rowNamed(twoWayHost, name))).toBe(false);
+    }
   });
 
   it('disables "Sync now" until the credentials are complete', () => {

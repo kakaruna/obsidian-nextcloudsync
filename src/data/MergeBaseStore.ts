@@ -1,8 +1,11 @@
-import { DataAdapter } from 'obsidian';
+import { DataAdapter, Platform } from 'obsidian';
 import { AsyncMutex } from '../util/AsyncMutex';
 
 const TMP_SUFFIX = '.tmp';
 const SAVE_DEBOUNCE_MS = 2000;
+// Android Capacitor FilesystemPlugin.readFile JSON-escapes the whole file on a ~256 MB Java heap;
+// reading a larger merge-base store crash-loops the app on startup before settings can even be opened.
+const MAX_MOBILE_MERGE_BASE_BYTES = 20 * 1024 * 1024;
 
 // Last-synced body of each Auto Merge File, the common ancestor for 3-way conflict merges. Without a real base,
 // reconcile-text duplicates the blocks both sides share. Kept out of StateDB (high-churn metadata) to avoid bloating its saves.
@@ -32,6 +35,15 @@ export class MergeBaseStore {
         if (!(await this.adapter.exists(this.tmpPath))) return;
         readPath = this.tmpPath;
         recoveredFromTmp = true;
+      }
+      if (Platform.isMobile && typeof this.adapter.stat === 'function') {
+        const st = await this.adapter.stat(readPath);
+        if (st && st.size > MAX_MOBILE_MERGE_BASE_BYTES) {
+          console.warn(
+            `[MergeBaseStore] Skipping oversized merge-base store (${(st.size / 1024 / 1024).toFixed(1)} MB) on mobile to prevent OutOfMemoryError`,
+          );
+          return;
+        }
       }
       const raw = await this.adapter.read(readPath);
       const parsed = JSON.parse(raw) as Record<string, string>;
@@ -79,6 +91,34 @@ export class MergeBaseStore {
       return;
     }
     await this.saveMutex.run(() => undefined);
+  }
+
+  // Releases in-memory bases and removes persisted snapshot files without serializing anything.
+  async clearAndPurge(): Promise<void> {
+    if (this.saveTimer !== null) {
+      window.clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    this.bases = {};
+    await this.saveMutex.run(async () => {
+      await MergeBaseStore.removeIfExists(this.adapter, this.storePath);
+      await MergeBaseStore.removeIfExists(this.adapter, this.tmpPath);
+    });
+  }
+
+  // Deletes persisted merge-base files without reading or parsing them into memory (avoids OOM on startup).
+  static async purgeFiles(adapter: DataAdapter, pluginDir: string, deviceId: string): Promise<void> {
+    const storePath = `${pluginDir}/merge-base-${deviceId}.json`;
+    await MergeBaseStore.removeIfExists(adapter, storePath);
+    await MergeBaseStore.removeIfExists(adapter, storePath + TMP_SUFFIX);
+  }
+
+  private static async removeIfExists(adapter: DataAdapter, path: string): Promise<void> {
+    try {
+      if (await adapter.exists(path)) await adapter.remove(path);
+    } catch {
+      // Best-effort cleanup: a missing or locked file must not block sync startup.
+    }
   }
 
   private async doSave(): Promise<void> {

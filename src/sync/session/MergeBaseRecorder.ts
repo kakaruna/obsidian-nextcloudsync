@@ -9,6 +9,8 @@ export interface MergeBaseRecorderDeps {
   autoMergeFileTypes(): readonly string[];
   // Plugin files never enter text merge, so they keep no merge base.
   isPluginPath(path: string): boolean;
+  // True when merge-base snapshots are disabled (e.g. one-way sync mode).
+  disabled?(): boolean;
 }
 
 export class MergeBaseRecorder {
@@ -28,13 +30,13 @@ export class MergeBaseRecorder {
 
   // Dropped on deletion so the base does not leak.
   drop(path: string): void {
-    if (!this.deps.baseStore || this.deps.isPluginPath(path)) return;
+    if (!this.deps.baseStore || this.deps.disabled?.() || this.deps.isPluginPath(path)) return;
     this.deps.baseStore.delete(path);
     this.deps.baseStore.requestSave();
   }
 
   private shouldRecord(path: string): boolean {
-    if (!this.deps.baseStore || this.deps.isPluginPath(path)) return false;
+    if (!this.deps.baseStore || this.deps.disabled?.() || this.deps.isPluginPath(path)) return false;
     // Every Auto Merge File (body 3-way) and every markdown file (frontmatter set-merge needs a base to
     // detect deletions even when `md` is an Other File) gets a base.
     return isAutoMergeFileType(path, this.deps.autoMergeFileTypes()) || isMarkdown(path);

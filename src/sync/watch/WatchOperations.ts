@@ -58,6 +58,7 @@ export interface WatchDeps {
   // The SAME "Wi-Fi only" decision the full sync makes at its entry. True skips the operation entirely: no
   // network, no local write, no StateDB change.
   isBlockedByWifiOnly(): boolean;
+  isOneWaySync?(): boolean;
   isSyncRunning(): boolean;
   // The full sync's per-file classifier, so watch mode and "Sync now" run the same decision code and reach
   // identical results.
@@ -125,7 +126,7 @@ export class WatchOperations {
   // Fetches the remote's current state, then hands it to the SAME classifier the full sync uses (processFile), so
   // a blind PUT can never overwrite another device's edit silently (issue #23). No decision lives here.
   async syncSingleFile(path: string): Promise<void> {
-    if (this.deps.isSystemExcluded(path) || this.deps.isPluginPath(path)) return;
+    if (this.deps.isOneWaySync?.() || this.deps.isSystemExcluded(path) || this.deps.isPluginPath(path)) return;
     if (this.skippedOnCellular('sync', path)) return;
     // The early exits stay OUTSIDE the lock: neither touches shared state and a no-op must not queue behind real work.
     return this.withPathLock(path, () => this.syncSingleFileLocked(path));
@@ -189,7 +190,7 @@ export class WatchOperations {
   // still matches our base, else restore the remote copy. `deleteFile`'s expected-id argument is ignored by
   // every client (blind DELETE), so it cannot serve as the guard.
   async deleteSingleFile(path: string): Promise<void> {
-    if (this.deps.isSystemExcluded(path) || this.deps.isPluginPath(path)) return;
+    if (this.deps.isOneWaySync?.() || this.deps.isSystemExcluded(path) || this.deps.isPluginPath(path)) return;
     if (this.skippedOnCellular('delete', path)) return;
     // Same lock as syncSingleFile: an upload and a delete crossing on one path would otherwise decide by timing.
     return this.withPathLock(path, () => this.deleteSingleFileLocked(path));
@@ -226,7 +227,7 @@ export class WatchOperations {
   }
 
   async renameSingleFile(oldPath: string, newPath: string): Promise<void> {
-    if (this.deps.isPluginPath(oldPath) || this.deps.isPluginPath(newPath)) return;
+    if (this.deps.isOneWaySync?.() || this.deps.isPluginPath(oldPath) || this.deps.isPluginPath(newPath)) return;
     if (this.deps.isSystemExcluded(oldPath) && this.deps.isSystemExcluded(newPath)) return;
     if (this.skippedOnCellular('rename', `${oldPath} → ${newPath}`)) return;
     // Both ends are locked: a rename moves state between two paths, so one lock leaves the other open to a
@@ -250,7 +251,7 @@ export class WatchOperations {
 
   // MKCOL is idempotent (405 swallowed), which also makes it safe against a stray download-created-folder event.
   async createSingleFolder(path: string): Promise<void> {
-    if (this.deps.isSystemExcluded(path) || this.deps.isPluginPath(path)) return;
+    if (this.deps.isOneWaySync?.() || this.deps.isSystemExcluded(path) || this.deps.isPluginPath(path)) return;
     if (this.skippedOnCellular('folder-create', path)) return;
     const conn = await this.deps.connect();
     this.begin();
@@ -269,7 +270,7 @@ export class WatchOperations {
   // Only a TRACKED folder is propagated; an untracked one was never on the server. The remote delete routes
   // through the Nextcloud trashbin (recoverable) and a 404 is the desired end state.
   async deleteSingleFolder(path: string): Promise<void> {
-    if (this.deps.isSystemExcluded(path) || this.deps.isPluginPath(path)) return;
+    if (this.deps.isOneWaySync?.() || this.deps.isSystemExcluded(path) || this.deps.isPluginPath(path)) return;
     if (this.skippedOnCellular('folder-delete', path)) return;
     if (!this.deps.stateDB.getDir(path)) return;
     // Same rule as deleteSingleFile, and this is the loudest sink (a recursive collection DELETE): a running scan
@@ -299,7 +300,7 @@ export class WatchOperations {
   // The server moves the whole subtree. Child-file rename events fired alongside are handled best-effort by
   // renameSingleFile; their 404s are harmless because the parent MOVE already relocated them.
   async renameSingleFolder(oldPath: string, newPath: string): Promise<void> {
-    if (this.deps.isPluginPath(oldPath) || this.deps.isPluginPath(newPath)) return;
+    if (this.deps.isOneWaySync?.() || this.deps.isPluginPath(oldPath) || this.deps.isPluginPath(newPath)) return;
     if (this.deps.isSystemExcluded(oldPath) && this.deps.isSystemExcluded(newPath)) return;
     if (this.skippedOnCellular('folder-rename', `${oldPath} → ${newPath}`)) return;
     const conn = await this.deps.connect();
@@ -320,6 +321,10 @@ export class WatchOperations {
   // Called once the run has finished. The set is drained into a local copy first so re-entry cannot loop.
   // Failures are per-path and already handled inside syncSingleFile.
   async drainPending(): Promise<void> {
+    if (this.deps.isOneWaySync?.()) {
+      this.pendingPaths.clear();
+      return;
+    }
     if (this.pendingPaths.size === 0) return;
     const paths = [...this.pendingPaths];
     this.pendingPaths.clear();

@@ -62,6 +62,12 @@ export interface DavSyncSettings {
   passwordSecretId: string;
   /** Auto-sync period in minutes. 0 = manual only. Disabled on mobile (the OS suspends timers). */
   syncIntervalMinutes: number;
+  /**
+   * One-way sync (from server): the server is authoritative. Never uploads, deletes, or moves
+   * anything on the server; overwrites local edits, restores locally deleted files, removes
+   * local-only files/folders, and keeps no local merge-base or clean-side snapshots.
+   */
+  oneWaySync: boolean;
   /** WebDAV request timeout in seconds. */
   networkTimeoutSeconds: number;
   deviceId: string;
@@ -117,6 +123,7 @@ export const DEFAULT_SETTINGS: DavSyncSettings = {
   username: '',
   passwordSecretId: '',
   syncIntervalMinutes: 15,
+  oneWaySync: false,
   networkTimeoutSeconds: 30,
   deviceId: '',
   maxFileSizeMB: 0, // desktop default; mobile gets a cap in loadSettings()

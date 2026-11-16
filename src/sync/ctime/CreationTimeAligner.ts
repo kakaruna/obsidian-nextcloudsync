@@ -21,6 +21,7 @@ export interface CreationTimeAlignerDeps {
   localAdapter: Pick<LocalAdapter, 'stat' | 'setCreationTime' | 'creationTimeSupport'>;
   stateDB: Pick<StateDB, 'getFile' | 'setFile' | 'setRemoteRootEtag'>;
   isBeingEdited(path: string): boolean;
+  isOneWaySync?(): boolean;
   logger?: Pick<FileLogger, 'log'>;
 }
 
@@ -42,7 +43,9 @@ export class CreationTimeAligner implements CreationTimePort {
         remoteAttemptSeconds: base?.ctimeRemoteAttempt,
       });
       if (plan.setLocalSeconds !== null) await this.alignLocal(remote.path, plan.setLocalSeconds);
-      if (plan.setRemoteSeconds !== null) await this.alignRemote(client, remote.path, plan.setRemoteSeconds);
+      if (!this.deps.isOneWaySync?.() && plan.setRemoteSeconds !== null) {
+        await this.alignRemote(client, remote.path, plan.setRemoteSeconds);
+      }
     } catch (e) {
       await this.log(`unexpected error (${errText(e)})`, remote.path);
     }
